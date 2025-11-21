@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tracekit-apm"
-version = "1.0.0"
+version = "1.0.1"
 description = "TraceKit APM for Python - Zero-config distributed tracing and code monitoring for Flask, FastAPI, and Django"
 readme = "README.md"
 authors = [
@@ -57,7 +57,7 @@ all = [
 
 [project.urls]
 Homepage = "https://tracekit.dev"
-Documentation = "https://docs.tracekit.dev"
+Documentation = "https://app.tracekit.dev/docs/languages/python"
 Repository = "https://github.com/Tracekit-Dev/python-apm"
 Issues = "https://github.com/Tracekit-Dev/python-apm/issues"
 

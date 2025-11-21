@@ -560,7 +560,7 @@ with tracer.start_as_current_span('operation-name') as span:
 
 ## Support
 
-- Documentation: [https://docs.tracekit.dev](https://docs.tracekit.dev)
+- Documentation: [https://app.tracekit.dev/docs/languages/python](https://app.tracekit.dev/docs/languages/python)
 - Issues: [https://github.com/Tracekit-Dev/python-apm/issues](https://github.com/Tracekit-Dev/python-apm/issues)
 - Email: support@tracekit.dev
 
