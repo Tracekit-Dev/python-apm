@@ -4,7 +4,7 @@ TraceKit APM for Python
 Zero-config distributed tracing and code monitoring for Flask, FastAPI, and Django applications.
 """
 
-from typing import Optional
+from typing import Dict, Optional
 from tracekit.client import TracekitClient, TracekitConfig
 from tracekit.snapshot_client import SnapshotClient
 
@@ -28,6 +28,7 @@ def init(
     enabled: bool = True,
     sample_rate: float = 1.0,
     enable_code_monitoring: bool = False,
+    service_name_mappings: Optional[Dict[str, str]] = None,
 ) -> TracekitClient:
     """
     Initialize TraceKit APM with the given configuration.
@@ -39,6 +40,8 @@ def init(
         enabled: Enable/disable tracing (default: True)
         sample_rate: Sample rate 0.0-1.0 (default: 1.0 = 100%)
         enable_code_monitoring: Enable live code debugging (default: False)
+        service_name_mappings: Map hostnames to service names for peer.service attribute
+            Example: {"localhost:8082": "go-test-app", "localhost:8084": "node-test-app"}
 
     Returns:
         TracekitClient instance
@@ -52,6 +55,7 @@ def init(
         enabled=enabled,
         sample_rate=sample_rate,
         enable_code_monitoring=enable_code_monitoring,
+        service_name_mappings=service_name_mappings,
     )
 
     _global_client = TracekitClient(config)

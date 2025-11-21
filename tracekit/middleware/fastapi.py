@@ -9,8 +9,12 @@ from fastapi import FastAPI, Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 from opentelemetry import trace, context
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from tracekit.client import TracekitClient
+
+# W3C Trace Context propagator for extracting traceparent header
+_propagator = TraceContextTextMapPropagator()
 
 
 class TracekitMiddleware(BaseHTTPMiddleware):
@@ -43,8 +47,12 @@ class TracekitMiddleware(BaseHTTPMiddleware):
             if hasattr(route, "path"):
                 route_path = route.path
 
-        # Start trace span
-        span = self.client.start_trace(
+        # Extract trace context from incoming request headers (W3C Trace Context)
+        # This enables distributed tracing - the span will be linked to the parent trace
+        parent_context = _propagator.extract(carrier=dict(request.headers))
+
+        # Start trace span with parent context (if any)
+        span = self.client.start_server_span(
             f"{request.method} {route_path}",
             attributes={
                 "http.method": request.method,
@@ -52,7 +60,8 @@ class TracekitMiddleware(BaseHTTPMiddleware):
                 "http.route": route_path,
                 "http.user_agent": request.headers.get("user-agent"),
                 "http.client_ip": request.client.host if request.client else None,
-            }
+            },
+            parent_context=parent_context
         )
 
         # Activate span in context

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tracekit-apm"
-version = "1.0.1"
+version = "1.1.0"
 description = "TraceKit APM for Python - Zero-config distributed tracing and code monitoring for Flask, FastAPI, and Django"
 readme = "README.md"
 authors = [
@@ -41,6 +41,10 @@ dependencies = [
     "opentelemetry-api>=1.20.0",
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-exporter-otlp-proto-http>=1.20.0",
+    "opentelemetry-instrumentation>=0.41b0",
+    "opentelemetry-instrumentation-requests>=0.41b0",
+    "opentelemetry-instrumentation-urllib>=0.41b0",
+    "opentelemetry-instrumentation-urllib3>=0.41b0",
     "requests>=2.28.0",
 ]
 

@@ -8,9 +8,13 @@ from typing import Callable, Optional
 from flask import Flask, request, g
 from opentelemetry import trace, context
 from opentelemetry.trace import Span
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from tracekit.client import TracekitClient
 from tracekit.snapshot_client import SnapshotClient
+
+# W3C Trace Context propagator for extracting traceparent header
+_propagator = TraceContextTextMapPropagator()
 
 
 def create_flask_middleware(
@@ -45,8 +49,12 @@ def create_flask_middleware(
             if not self.client.is_enabled() or not self.client.should_sample():
                 return
 
-            # Start trace span
-            span = self.client.start_trace(
+            # Extract trace context from incoming request headers (W3C Trace Context)
+            # This enables distributed tracing - the span will be linked to the parent trace
+            parent_context = _propagator.extract(carrier=dict(request.headers))
+
+            # Start trace span with parent context (if any)
+            span = self.client.start_server_span(
                 f"{request.method} {request.path}",
                 attributes={
                     "http.method": request.method,
@@ -54,7 +62,8 @@ def create_flask_middleware(
                     "http.route": request.endpoint or request.path,
                     "http.user_agent": request.user_agent.string if request.user_agent else None,
                     "http.client_ip": request.remote_addr,
-                }
+                },
+                parent_context=parent_context
             )
 
             # Store span in Flask's g object and activate context

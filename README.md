@@ -210,6 +210,137 @@ Snapshots include:
 
 Get your API key at [https://app.tracekit.dev](https://app.tracekit.dev)
 
+## Automatic Service Discovery
+
+TraceKit automatically instruments **outgoing HTTP calls** to create service dependency graphs. This enables you to see which services talk to each other in your distributed system.
+
+### How It Works
+
+When your service makes an HTTP request to another service:
+
+1. ✅ TraceKit creates a **CLIENT span** for the outgoing request
+2. ✅ Trace context is automatically injected into request headers (`traceparent`)
+3. ✅ The receiving service creates a **SERVER span** linked to your CLIENT span
+4. ✅ TraceKit maps the dependency: **YourService → TargetService**
+
+### Supported HTTP Libraries
+
+TraceKit automatically instruments these HTTP libraries:
+
+- ✅ **`requests`** (most popular Python HTTP library)
+- ✅ **`urllib`** (Python standard library)
+- ✅ **`urllib3`** (used by requests under the hood)
+- ✅ **`httpx`** (async HTTP library - works via urllib3)
+
+**Zero configuration required!** Just make HTTP calls as normal:
+
+```python
+import requests
+import urllib.request
+import httpx
+
+# All of these automatically create CLIENT spans:
+requests.get('http://payment-service/charge')
+urllib.request.urlopen('http://inventory-service/check')
+await httpx.AsyncClient().get('http://user-service/profile/123')
+```
+
+### Service Name Detection
+
+TraceKit intelligently extracts service names from URLs:
+
+| URL | Extracted Service Name |
+|-----|------------------------|
+| `http://payment-service:3000` | `payment-service` |
+| `http://payment.internal` | `payment` |
+| `http://payment.svc.cluster.local` | `payment` |
+| `https://api.example.com` | `api.example.com` |
+
+This works seamlessly with:
+- Kubernetes service names
+- Internal DNS names
+- Docker Compose service names
+- External APIs
+
+### Custom Service Name Mappings
+
+For local development or when service names can't be inferred from hostnames, use `service_name_mappings`:
+
+```python
+client = tracekit.init(
+    api_key="your-api-key",
+    service_name="my-service",
+    # Map localhost URLs to actual service names
+    service_name_mappings={
+        'localhost:8082': 'payment-service',
+        'localhost:8083': 'user-service',
+        'localhost:8084': 'inventory-service',
+        'localhost:5001': 'analytics-service',
+    }
+)
+
+# Now requests to localhost:8082 will show as "payment-service" in the service graph
+response = requests.get('http://localhost:8082/charge')
+# -> Creates CLIENT span with peer.service = "payment-service"
+```
+
+This is especially useful when:
+- Running microservices locally on different ports
+- Using Docker Compose with localhost networking
+- Testing distributed tracing in development
+
+### Example: Multi-Service Application
+
+```python
+from flask import Flask
+import tracekit
+import requests
+
+app = Flask(__name__)
+
+# Initialize TraceKit
+client = tracekit.init(
+    api_key="your-api-key",
+    service_name="checkout-service",
+    auto_instrument_http_client=True  # default: True
+)
+
+@app.route('/checkout')
+def checkout():
+    # This HTTP call automatically creates a CLIENT span
+    payment_response = requests.post(
+        'http://payment-service/charge',
+        json={'amount': 99.99}
+    )
+
+    # This one too!
+    inventory_response = requests.post(
+        'http://inventory-service/reserve',
+        json={'item_id': 123}
+    )
+
+    return {'status': 'success'}
+```
+
+### Viewing Service Dependencies
+
+Visit your TraceKit dashboard to see:
+
+- **Service Map**: Visual graph showing which services call which
+- **Service List**: Table of all services with health metrics
+- **Service Detail**: Deep dive on individual services with upstream/downstream dependencies
+
+### Disabling Auto-Instrumentation
+
+If you need to disable automatic HTTP client instrumentation:
+
+```python
+client = tracekit.init(
+    api_key="your-api-key",
+    auto_instrument_http_client=False  # Disable auto-instrumentation
+)
+```
+
 ## Configuration
 
 ### Basic Configuration
@@ -234,7 +365,13 @@ client = tracekit.init(
     sample_rate=0.5,  # Trace 50% of requests
 
     # Optional: Enable live code debugging (default: False)
-    enable_code_monitoring=True
+    enable_code_monitoring=True,
+
+    # Optional: Map hostnames to service names for service graph
+    service_name_mappings={
+        'localhost:8082': 'payment-service',
+        'localhost:8083': 'user-service',
+    }
 )
 ```
 

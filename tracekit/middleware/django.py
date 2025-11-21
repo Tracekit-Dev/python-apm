@@ -6,8 +6,12 @@ import time
 from typing import Callable, Optional
 
 from opentelemetry import trace, context
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from tracekit.client import TracekitClient
+
+# W3C Trace Context propagator for extracting traceparent header
+_propagator = TraceContextTextMapPropagator()
 
 
 class TracekitDjangoMiddleware:
@@ -58,8 +62,18 @@ class TracekitDjangoMiddleware:
         if hasattr(request, "resolver_match") and request.resolver_match:
             route_path = request.resolver_match.route or request.path
 
-        # Start trace span
-        span = self.client.start_trace(
+        # Extract trace context from incoming request headers (W3C Trace Context)
+        # Django headers are in META with HTTP_ prefix, convert to standard format
+        headers = {}
+        for key, value in request.META.items():
+            if key.startswith("HTTP_"):
+                # Convert HTTP_TRACEPARENT to traceparent
+                header_name = key[5:].lower().replace("_", "-")
+                headers[header_name] = value
+        parent_context = _propagator.extract(carrier=headers)
+
+        # Start trace span with parent context (if any)
+        span = self.client.start_server_span(
             f"{request.method} {route_path}",
             attributes={
                 "http.method": request.method,
@@ -67,7 +81,8 @@ class TracekitDjangoMiddleware:
                 "http.route": route_path,
                 "http.user_agent": request.META.get("HTTP_USER_AGENT"),
                 "http.client_ip": self._get_client_ip(request),
-            }
+            },
+            parent_context=parent_context
         )
 
         # Activate span in context

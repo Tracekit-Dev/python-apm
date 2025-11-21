@@ -7,12 +7,15 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from opentelemetry import trace
+from opentelemetry import trace, context
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Span, Status, StatusCode
+from opentelemetry.instrumentation.requests import RequestsInstrumentor
+from opentelemetry.instrumentation.urllib import URLLibInstrumentor
+from opentelemetry.instrumentation.urllib3 import URLLib3Instrumentor
 
 from tracekit.snapshot_client import SnapshotClient
 
@@ -26,6 +29,11 @@ class TracekitConfig:
     enabled: bool = True
     sample_rate: float = 1.0
     enable_code_monitoring: bool = False
+    auto_instrument_http_client: bool = True
+    # Map hostnames to service names for peer.service attribute
+    # Useful for mapping localhost URLs to actual service names
+    # Example: {"localhost:8082": "go-test-app", "localhost:8084": "node-test-app"}
+    service_name_mappings: Optional[Dict[str, str]] = None
 
 
 class TracekitClient:
@@ -60,6 +68,10 @@ class TracekitClient:
             # Register the provider
             trace.set_tracer_provider(self.provider)
 
+            # Auto-instrument HTTP clients for CLIENT span creation
+            if config.auto_instrument_http_client:
+                self._instrument_http_clients()
+
         self.tracer = trace.get_tracer(__name__, "1.0.0")
 
         # Initialize snapshot client if enabled
@@ -91,6 +103,33 @@ class TracekitClient:
             operation_name,
             kind=trace.SpanKind.SERVER,
             attributes=self._normalize_attributes(attributes or {})
+        )
+        return span
+
+    def start_server_span(
+        self,
+        operation_name: str,
+        attributes: Optional[Dict[str, Any]] = None,
+        parent_context: Optional[Any] = None
+    ) -> Span:
+        """
+        Start a SERVER span, properly inheriting from the provided context.
+        This is used by middleware to create spans that are children of incoming trace context.
+
+        Args:
+            operation_name: Name of the operation
+            attributes: Optional attributes to add to the span
+            parent_context: Optional parent context from traceparent header extraction
+
+        Returns:
+            OpenTelemetry Span object
+        """
+        ctx = parent_context if parent_context else context.get_current()
+        span = self.tracer.start_span(
+            operation_name,
+            kind=trace.SpanKind.SERVER,
+            attributes=self._normalize_attributes(attributes or {}),
+            context=ctx
         )
         return span
 
@@ -256,6 +295,107 @@ class TracekitClient:
                 label,
                 variables or {}
             )
+
+    def _instrument_http_clients(self) -> None:
+        """
+        Auto-instrument HTTP client libraries to create CLIENT spans
+        with peer.service attribute for service dependency mapping.
+        """
+        # Instrument requests library (most common)
+        try:
+            RequestsInstrumentor().instrument(
+                tracer_provider=self.provider,
+                request_hook=self._http_request_hook,
+            )
+        except Exception as e:
+            # Ignore if already instrumented or not available
+            pass
+
+        # Instrument urllib
+        try:
+            URLLibInstrumentor().instrument(
+                tracer_provider=self.provider,
+                request_hook=self._http_request_hook,
+            )
+        except Exception as e:
+            pass
+
+        # Instrument urllib3
+        try:
+            URLLib3Instrumentor().instrument(
+                tracer_provider=self.provider,
+                request_hook=self._http_request_hook,
+            )
+        except Exception as e:
+            pass
+
+    def _http_request_hook(self, span: Span, request: Any) -> None:
+        """
+        Hook called for outgoing HTTP requests to add peer.service attribute.
+
+        Args:
+            span: The CLIENT span being created
+            request: The request object (varies by library)
+        """
+        try:
+            # Extract hostname from request (different per library)
+            hostname = None
+
+            # requests library
+            if hasattr(request, 'url'):
+                from urllib.parse import urlparse
+                parsed = urlparse(request.url)
+                hostname = parsed.hostname
+            # urllib/urllib3
+            elif hasattr(request, 'host'):
+                hostname = request.host
+
+            if hostname:
+                service_name = self._extract_service_name(hostname)
+                span.set_attribute("peer.service", service_name)
+        except Exception:
+            # Don't fail request if attribute extraction fails
+            pass
+
+    def _extract_service_name(self, hostname: str) -> str:
+        """
+        Extract service name from hostname for service-to-service mapping.
+
+        Examples:
+            "payment-service" -> "payment-service"
+            "payment.internal.svc.cluster.local" -> "payment"
+            "api.example.com" -> "api.example.com"
+
+        Args:
+            hostname: The hostname to extract from
+
+        Returns:
+            Extracted service name
+        """
+        if not hostname:
+            return "unknown"
+
+        # First, check if there's a configured mapping for this hostname
+        # This allows mapping localhost:port to actual service names
+        if self.config.service_name_mappings:
+            if hostname in self.config.service_name_mappings:
+                return self.config.service_name_mappings[hostname]
+
+            # Also check without port
+            host_without_port = hostname.split(":")[0]
+            if host_without_port in self.config.service_name_mappings:
+                return self.config.service_name_mappings[host_without_port]
+
+        # Handle Kubernetes service names
+        if ".svc.cluster.local" in hostname:
+            return hostname.split(".")[0]
+
+        # Handle internal domain
+        if ".internal" in hostname:
+            return hostname.split(".")[0]
+
+        # Default: return full hostname (strip port if present)
+        return hostname.split(":")[0]
 
     def _normalize_attributes(self, attributes: Dict[str, Any]) -> Dict[str, Any]:
         """
