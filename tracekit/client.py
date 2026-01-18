@@ -77,27 +77,112 @@ class LocalUISpanProcessor(SpanProcessor):
             return
 
         # Send to local UI using raw HTTP to avoid instrumentation infinite loop
-        # We cannot use OTLPSpanExporter because it uses requests library which is instrumented
+        # Cannot use requests, urllib, or urllib3 - all are instrumented by OpenTelemetry
         try:
-            import urllib3
+            import http.client
             import json
-            from opentelemetry.exporter.otlp.proto.http._log_encoder import encode_spans
 
-            # Encode span to OTLP protobuf format
-            encoded = encode_spans([span])
+            # Convert span to OTLP JSON format (same format as Node.js SDK)
+            otlp_payload = self._convert_span_to_otlp(span)
+            payload = json.dumps(otlp_payload)
 
-            # Send directly using urllib3 (not instrumented by OpenTelemetry)
-            http = urllib3.PoolManager()
-            http.request(
+            # Use http.client (not instrumented by OpenTelemetry)
+            conn = http.client.HTTPConnection('localhost', 9999, timeout=1.0)
+            conn.request(
                 'POST',
-                self.local_ui_url,
-                body=encoded,
-                headers={'Content-Type': 'application/x-protobuf'},
-                timeout=1.0
+                '/v1/traces',
+                body=payload.encode('utf-8'),
+                headers={'Content-Type': 'application/json'}
             )
-        except Exception:
+            response = conn.getresponse()
+            response.read()  # Consume response to free connection
+            conn.close()
+        except Exception as e:
             # Silently fail - don't block trace sending to cloud
             pass
+
+    def _convert_span_to_otlp(self, span: ReadableSpan) -> dict:
+        """Convert ReadableSpan to OTLP JSON format."""
+        # Convert resource attributes
+        resource_attrs = []
+        if span.resource:
+            for key, value in span.resource.attributes.items():
+                resource_attrs.append({
+                    'key': key,
+                    'value': self._convert_value(value)
+                })
+
+        # Convert span attributes
+        span_attrs = []
+        for key, value in span.attributes.items():
+            span_attrs.append({
+                'key': key,
+                'value': self._convert_value(value)
+            })
+
+        # Convert events
+        events = []
+        for event in span.events:
+            event_attrs = []
+            for key, value in (event.attributes or {}).items():
+                event_attrs.append({
+                    'key': key,
+                    'value': self._convert_value(value)
+                })
+            events.append({
+                'timeUnixNano': str(event.timestamp),
+                'name': event.name,
+                'attributes': event_attrs
+            })
+
+        # Build OTLP structure
+        return {
+            'resourceSpans': [{
+                'resource': {
+                    'attributes': resource_attrs
+                },
+                'scopeSpans': [{
+                    'scope': {
+                        'name': span.instrumentation_scope.name if span.instrumentation_scope else '',
+                        'version': span.instrumentation_scope.version if span.instrumentation_scope else ''
+                    },
+                    'spans': [{
+                        'traceId': format(span.context.trace_id, '032x'),
+                        'spanId': format(span.context.span_id, '016x'),
+                        'parentSpanId': format(span.parent.span_id, '016x') if span.parent else '',
+                        'name': span.name,
+                        'kind': span.kind.value if span.kind else 0,
+                        'startTimeUnixNano': str(span.start_time),
+                        'endTimeUnixNano': str(span.end_time),
+                        'attributes': span_attrs,
+                        'events': events,
+                        'status': {
+                            'code': span.status.status_code.value if span.status else 0,
+                            'message': span.status.description if span.status else ''
+                        }
+                    }]
+                }]
+            }]
+        }
+
+    def _convert_value(self, value: Any) -> dict:
+        """Convert attribute value to OTLP format."""
+        if isinstance(value, str):
+            return {'stringValue': value}
+        elif isinstance(value, bool):
+            return {'boolValue': value}
+        elif isinstance(value, int):
+            return {'intValue': str(value)}
+        elif isinstance(value, float):
+            return {'doubleValue': value}
+        elif isinstance(value, (list, tuple)):
+            return {
+                'arrayValue': {
+                    'values': [self._convert_value(v) for v in value]
+                }
+            }
+        else:
+            return {'stringValue': str(value)}
 
     def shutdown(self) -> None:
         """Called when the processor is shut down."""
