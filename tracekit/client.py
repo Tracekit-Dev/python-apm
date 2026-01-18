@@ -76,19 +76,25 @@ class LocalUISpanProcessor(SpanProcessor):
         if not self.local_ui_available:
             return
 
-        # Send to local UI using the same OTLP format
+        # Send to local UI using raw HTTP to avoid instrumentation infinite loop
+        # We cannot use OTLPSpanExporter because it uses requests library which is instrumented
         try:
-            import requests
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+            import urllib3
+            import json
+            from opentelemetry.exporter.otlp.proto.http._log_encoder import encode_spans
 
-            # Create a temporary exporter for local UI
-            exporter = OTLPSpanExporter(
-                endpoint=self.local_ui_url,
-                timeout=1
+            # Encode span to OTLP protobuf format
+            encoded = encode_spans([span])
+
+            # Send directly using urllib3 (not instrumented by OpenTelemetry)
+            http = urllib3.PoolManager()
+            http.request(
+                'POST',
+                self.local_ui_url,
+                body=encoded,
+                headers={'Content-Type': 'application/x-protobuf'},
+                timeout=1.0
             )
-
-            # Export the span
-            exporter.export([span])
         except Exception:
             # Silently fail - don't block trace sending to cloud
             pass
