@@ -30,9 +30,14 @@ def _detect_local_ui() -> bool:
         True if local UI is available, False otherwise
     """
     try:
-        import requests
-        response = requests.get('http://localhost:9999/api/health', timeout=0.5)
-        return response.ok
+        import http.client
+        conn = http.client.HTTPConnection('localhost', 9999, timeout=0.5)
+        conn.request('GET', '/api/health')
+        response = conn.getresponse()
+        status = response.status
+        response.read()  # Consume response to free connection
+        conn.close()
+        return status == 200
     except:
         return False
 
