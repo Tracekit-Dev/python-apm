@@ -2,6 +2,7 @@
 TraceKit Client - Main tracing client using OpenTelemetry
 """
 
+import os
 import random
 import traceback
 from dataclasses import dataclass
@@ -11,13 +12,94 @@ from opentelemetry import trace, context
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanProcessor, SpanExportResult
 from opentelemetry.trace import Span, Status, StatusCode
 from opentelemetry.instrumentation.requests import RequestsInstrumentor
 from opentelemetry.instrumentation.urllib import URLLibInstrumentor
 from opentelemetry.instrumentation.urllib3 import URLLib3Instrumentor
+from opentelemetry.sdk.trace import ReadableSpan
 
 from tracekit.snapshot_client import SnapshotClient
+
+
+def _detect_local_ui() -> bool:
+    """
+    Detect if TraceKit Local UI is running at http://localhost:9999.
+
+    Returns:
+        True if local UI is available, False otherwise
+    """
+    try:
+        import requests
+        response = requests.get('http://localhost:9999/api/health', timeout=0.5)
+        return response.ok
+    except:
+        return False
+
+
+def _is_development_mode() -> bool:
+    """
+    Check if running in development mode based on environment variables.
+
+    Returns:
+        True if in development mode, False otherwise
+    """
+    env = os.getenv('ENV', '').lower()
+    node_env = os.getenv('NODE_ENV', '').lower()
+    return env == 'development' or node_env == 'development'
+
+
+class LocalUISpanProcessor(SpanProcessor):
+    """
+    Custom span processor that sends traces to TraceKit Local UI in development mode.
+    This runs in addition to the main cloud exporter.
+    """
+
+    def __init__(self):
+        self.local_ui_available = False
+        self.local_ui_checked = False
+        self.local_ui_url = 'http://localhost:9999/v1/traces'
+
+    def on_start(self, span: ReadableSpan, parent_context=None) -> None:
+        """Called when a span is started."""
+        pass
+
+    def on_end(self, span: ReadableSpan) -> None:
+        """Called when a span is ended. Send to local UI if available."""
+        # Only check once per process
+        if not self.local_ui_checked:
+            self.local_ui_checked = True
+            self.local_ui_available = _detect_local_ui()
+            if self.local_ui_available:
+                print('🔍 Local UI detected at http://localhost:9999')
+
+        if not self.local_ui_available:
+            return
+
+        # Send to local UI using the same OTLP format
+        try:
+            import requests
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
+            # Create a temporary exporter for local UI
+            exporter = OTLPSpanExporter(
+                endpoint=self.local_ui_url,
+                timeout=1
+            )
+
+            # Export the span
+            exporter.export([span])
+        except Exception:
+            # Silently fail - don't block trace sending to cloud
+            pass
+
+    def shutdown(self) -> None:
+        """Called when the processor is shut down."""
+        pass
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        """Force flush any pending spans."""
+        return True
 
 
 @dataclass
@@ -56,7 +138,7 @@ class TracekitClient:
         self.provider = TracerProvider(resource=resource)
 
         if config.enabled:
-            # Configure OTLP exporter
+            # Configure OTLP exporter for cloud
             exporter = OTLPSpanExporter(
                 endpoint=config.endpoint,
                 headers={"X-API-Key": config.api_key}
@@ -64,6 +146,10 @@ class TracekitClient:
 
             # Use batch processor for better performance
             self.provider.add_span_processor(BatchSpanProcessor(exporter))
+
+            # Add local UI processor in development mode
+            if _is_development_mode():
+                self.provider.add_span_processor(LocalUISpanProcessor())
 
             # Register the provider
             trace.set_tracer_provider(self.provider)
