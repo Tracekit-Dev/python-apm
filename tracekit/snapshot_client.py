@@ -4,6 +4,7 @@ Snapshot Client - Code monitoring with breakpoints and variable inspection
 
 import inspect
 import json
+import re
 import threading
 import time
 from datetime import datetime
@@ -30,6 +31,14 @@ class BreakpointConfig:
 
 
 @dataclass
+class SecurityFlag:
+    """Security issue found in snapshot variables"""
+    type: str
+    severity: str
+    variable: Optional[str] = None
+
+
+@dataclass
 class Snapshot:
     """Snapshot of code execution state"""
     breakpoint_id: Optional[str]
@@ -39,6 +48,7 @@ class Snapshot:
     label: Optional[str]
     line_number: int
     variables: Dict[str, Any]
+    security_flags: Optional[List[Dict[str, Any]]]
     stack_trace: str
     trace_id: Optional[str]
     span_id: Optional[str]
@@ -155,6 +165,9 @@ class SnapshotClient:
         # Get stack trace
         stack_trace = self._get_stack_trace()
 
+        # Scan variables for security issues
+        sanitized_vars, security_flags = self.scan_for_security_issues(variables)
+
         # Create snapshot
         snapshot = Snapshot(
             breakpoint_id=breakpoint.id,
@@ -163,7 +176,8 @@ class SnapshotClient:
             function_name=function_name,
             label=label,
             line_number=line_number,
-            variables=self.sanitize_variables(variables),
+            variables=sanitized_vars,
+            security_flags=security_flags,
             stack_trace=stack_trace,
             request_context=request_context,
             trace_id=None,  # TODO: Extract from OpenTelemetry context
@@ -393,3 +407,60 @@ class SnapshotClient:
                 sanitized[key] = f"[{type(value).__name__}]"
 
         return sanitized
+
+    def scan_for_security_issues(
+        self,
+        variables: Dict[str, Any]
+    ) -> tuple[Dict[str, Any], Optional[List[Dict[str, Any]]]]:
+        """
+        Scan variables for sensitive data and return sanitized variables with security flags.
+
+        Args:
+            variables: Variables to scan
+
+        Returns:
+            Tuple of (sanitized_variables, security_flags)
+        """
+        # Sensitive data patterns
+        sensitive_patterns = {
+            'password': re.compile(r'(?i)(password|passwd|pwd)\s*[=:]\s*["\']?[^\s"\']{6,}'),
+            'api_key': re.compile(r'(?i)(api[_-]?key|apikey)\s*[=:]\s*["\']?[A-Za-z0-9_-]{20,}'),
+            'jwt': re.compile(r'eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*'),
+            'credit_card': re.compile(r'\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14})\b'),
+        }
+
+        # Variable name pattern for sensitive keywords
+        sensitive_name_pattern = re.compile(r'(?i)(password|secret|token|key|credential)')
+
+        security_flags = []
+        sanitized = self.sanitize_variables(variables)
+
+        # Scan variable names and values
+        for name, value in variables.items():
+            # Check variable name for sensitive patterns
+            if sensitive_name_pattern.search(name):
+                security_flags.append({
+                    'type': 'sensitive_variable_name',
+                    'severity': 'medium',
+                    'variable': name
+                })
+                sanitized[name] = '[REDACTED]'
+                continue
+
+            # Check variable value for sensitive data
+            try:
+                serialized = json.dumps(value)
+                for data_type, pattern in sensitive_patterns.items():
+                    if pattern.search(serialized):
+                        security_flags.append({
+                            'type': f'sensitive_data_{data_type}',
+                            'severity': 'high',
+                            'variable': name
+                        })
+                        sanitized[name] = '[REDACTED]'
+                        break
+            except (TypeError, ValueError):
+                # If value can't be serialized, keep sanitized version
+                pass
+
+        return sanitized, security_flags if security_flags else None
