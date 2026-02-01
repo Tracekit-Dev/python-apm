@@ -9,6 +9,7 @@ from opentelemetry import trace, context
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from tracekit.client import TracekitClient
+from tracekit.utils import extract_client_ip_from_headers
 
 # W3C Trace Context propagator for extracting traceparent header
 _propagator = TraceContextTextMapPropagator()
@@ -80,7 +81,10 @@ class TracekitDjangoMiddleware:
                 "http.url": request.build_absolute_uri(),
                 "http.route": route_path,
                 "http.user_agent": request.META.get("HTTP_USER_AGENT"),
-                "http.client_ip": self._get_client_ip(request),
+                "http.client_ip": extract_client_ip_from_headers(
+                    headers,
+                    request.META.get("REMOTE_ADDR")
+                ),
             },
             parent_context=parent_context
         )
@@ -117,10 +121,3 @@ class TracekitDjangoMiddleware:
         finally:
             # Detach context
             context.detach(token)
-
-    def _get_client_ip(self, request) -> Optional[str]:
-        """Extract client IP from request."""
-        x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
-        if x_forwarded_for:
-            return x_forwarded_for.split(",")[0].strip()
-        return request.META.get("REMOTE_ADDR")

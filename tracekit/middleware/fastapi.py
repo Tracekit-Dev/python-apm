@@ -12,6 +12,7 @@ from opentelemetry import trace, context
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from tracekit.client import TracekitClient
+from tracekit.utils import extract_client_ip_from_headers
 
 # W3C Trace Context propagator for extracting traceparent header
 _propagator = TraceContextTextMapPropagator()
@@ -59,7 +60,10 @@ class TracekitMiddleware(BaseHTTPMiddleware):
                 "http.url": str(request.url),
                 "http.route": route_path,
                 "http.user_agent": request.headers.get("user-agent"),
-                "http.client_ip": request.client.host if request.client else None,
+                "http.client_ip": extract_client_ip_from_headers(
+                    dict(request.headers),
+                    request.client.host if request.client else None
+                ),
             },
             parent_context=parent_context
         )

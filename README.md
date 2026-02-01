@@ -14,6 +14,7 @@ Zero-config distributed tracing and performance monitoring for Flask, FastAPI, a
 - ✅ **FastAPI Support** - ASGI middleware-based tracing
 - ✅ **Django Support** - Django middleware integration
 - ✅ **HTTP Request Tracing** - Track every request, route, and handler
+- ✅ **Client IP Capture** - Automatic IP detection for DDoS & traffic analysis
 - ✅ **Error Tracking** - Capture exceptions with full Python stack traces
 - ✅ **Code Discovery** - Automatically index code from exception stack traces
 - ✅ **Code Monitoring** - Live debugging with breakpoints and variable inspection

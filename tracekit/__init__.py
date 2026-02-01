@@ -7,6 +7,7 @@ Zero-config distributed tracing and code monitoring for Flask, FastAPI, and Djan
 from typing import Dict, Optional
 from tracekit.client import TracekitClient, TracekitConfig
 from tracekit.snapshot_client import SnapshotClient
+from tracekit.utils import extract_client_ip_from_headers
 
 __version__ = "1.0.0"
 __all__ = [
@@ -15,6 +16,7 @@ __all__ = [
     "SnapshotClient",
     "init",
     "get_client",
+    "extract_client_ip_from_headers",
 ]
 
 # Global client instance

@@ -12,6 +12,7 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 
 from tracekit.client import TracekitClient
 from tracekit.snapshot_client import SnapshotClient
+from tracekit.utils import extract_client_ip_from_headers
 
 # W3C Trace Context propagator for extracting traceparent header
 _propagator = TraceContextTextMapPropagator()
@@ -61,7 +62,10 @@ def create_flask_middleware(
                     "http.url": request.url,
                     "http.route": request.endpoint or request.path,
                     "http.user_agent": request.user_agent.string if request.user_agent else None,
-                    "http.client_ip": request.remote_addr,
+                    "http.client_ip": extract_client_ip_from_headers(
+                        dict(request.headers),
+                        request.remote_addr
+                    ),
                 },
                 parent_context=parent_context
             )
