@@ -8,12 +8,16 @@ from typing import Dict, Optional
 from tracekit.client import TracekitClient, TracekitConfig
 from tracekit.snapshot_client import SnapshotClient
 from tracekit.utils import extract_client_ip_from_headers
+from tracekit.metrics import Counter, Gauge, Histogram
 
 __version__ = "1.0.0"
 __all__ = [
     "TracekitClient",
     "TracekitConfig",
     "SnapshotClient",
+    "Counter",
+    "Gauge",
+    "Histogram",
     "init",
     "get_client",
     "extract_client_ip_from_headers",

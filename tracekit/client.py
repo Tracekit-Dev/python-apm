@@ -20,6 +20,7 @@ from opentelemetry.instrumentation.urllib3 import URLLib3Instrumentor
 from opentelemetry.sdk.trace import ReadableSpan
 
 from tracekit.snapshot_client import SnapshotClient
+from tracekit.metrics import MetricsRegistry, Counter, Gauge, Histogram, noop_counter, noop_gauge, noop_histogram
 
 
 def _detect_local_ui() -> bool:
@@ -198,12 +199,89 @@ class LocalUISpanProcessor(SpanProcessor):
         return True
 
 
+def _resolve_endpoint(endpoint: str, path: str, use_ssl: bool = True) -> str:
+    """
+    Resolve endpoint URL from base endpoint and path.
+
+    Always strips any existing service-specific paths and appends the correct path.
+
+    Args:
+        endpoint: Base endpoint (host or full URL)
+        path: Path to append (e.g. '/v1/traces')
+        use_ssl: Whether to use SSL (ignored if endpoint has scheme)
+
+    Returns:
+        Full endpoint URL
+    """
+    # If endpoint has a scheme (http:// or https://)
+    if endpoint.startswith('http://') or endpoint.startswith('https://'):
+        endpoint = endpoint.rstrip('/')  # Remove trailing slash
+
+        trimmed = endpoint.replace('https://', '').replace('http://', '')
+
+        # If endpoint has a path component, extract base URL
+        if '/' in trimmed:
+            # Always extract base URL and append correct path
+            base = _extract_base_url(endpoint)
+            return base + path if path else base
+
+        # Just host with scheme, add the path
+        return endpoint + path
+
+    # No scheme provided - build URL with scheme
+    scheme = 'https://' if use_ssl else 'http://'
+    endpoint = endpoint.rstrip('/')  # Remove trailing slash
+    return scheme + endpoint + path
+
+
+def _extract_base_url(full_url: str) -> str:
+    """
+    Extract base URL (scheme + host) from full URL, only if it contains
+    known service-specific paths.
+
+    Args:
+        full_url: Full URL with scheme and path
+
+    Returns:
+        Base URL (scheme + host only) if service-specific path detected,
+        otherwise returns full URL
+    """
+    # Check if URL contains known service-specific paths
+    has_service_path = any(
+        path in full_url
+        for path in ['/v1/traces', '/v1/metrics', '/api/v1/traces', '/api/v1/metrics']
+    )
+
+    # If it doesn't have a service-specific path, keep the URL as-is
+    if not has_service_path:
+        return full_url
+
+    # Extract scheme
+    if full_url.startswith('https://'):
+        scheme = 'https://'
+        remaining = full_url[8:]
+    elif full_url.startswith('http://'):
+        scheme = 'http://'
+        remaining = full_url[7:]
+    else:
+        return full_url
+
+    # Find first "/" to separate host from path
+    idx = remaining.find('/')
+    if idx != -1:
+        return scheme + remaining[:idx]
+
+    return scheme + remaining
+
+
 @dataclass
 class TracekitConfig:
     """Configuration for TraceKit client"""
     api_key: str
     service_name: str = "python-app"
-    endpoint: str = "https://app.tracekit.dev/v1/traces"
+    endpoint: str = "app.tracekit.dev"
+    traces_path: str = "/v1/traces"
+    metrics_path: str = "/v1/metrics"
     enabled: bool = True
     sample_rate: float = 1.0
     enable_code_monitoring: bool = False
@@ -224,6 +302,13 @@ class TracekitClient:
     def __init__(self, config: TracekitConfig):
         self.config = config
         self._snapshot_client: Optional[SnapshotClient] = None
+        self._metrics_registry: Optional[MetricsRegistry] = None
+
+        # Resolve endpoints
+        use_ssl = not config.endpoint.startswith('http://')
+        traces_endpoint = _resolve_endpoint(config.endpoint, config.traces_path, use_ssl)
+        metrics_endpoint = _resolve_endpoint(config.endpoint, config.metrics_path, use_ssl)
+        base_endpoint = _resolve_endpoint(config.endpoint, '', use_ssl)
 
         # Create resource with service name
         resource = Resource(attributes={
@@ -236,7 +321,7 @@ class TracekitClient:
         if config.enabled:
             # Configure OTLP exporter for cloud
             exporter = OTLPSpanExporter(
-                endpoint=config.endpoint,
+                endpoint=traces_endpoint,
                 headers={"X-API-Key": config.api_key}
             )
 
@@ -256,12 +341,14 @@ class TracekitClient:
 
         self.tracer = trace.get_tracer(__name__, "1.0.0")
 
+        # Initialize metrics registry
+        self._metrics_registry = MetricsRegistry(metrics_endpoint, config.api_key, config.service_name)
+
         # Initialize snapshot client if enabled
         if config.enable_code_monitoring:
-            base_url = config.endpoint.replace("/v1/traces", "")
             self._snapshot_client = SnapshotClient(
                 api_key=config.api_key,
-                base_url=base_url,
+                base_url=base_endpoint,
                 service_name=config.service_name
             )
             self._snapshot_client.start()
@@ -435,10 +522,14 @@ class TracekitClient:
             self.provider.force_flush()
 
     async def shutdown(self) -> None:
-        """Shutdown the tracer provider and snapshot client."""
+        """Shutdown the tracer provider, metrics registry, and snapshot client."""
         # Stop snapshot client first
         if self._snapshot_client:
             self._snapshot_client.stop()
+
+        # Shutdown metrics registry
+        if self._metrics_registry:
+            self._metrics_registry.shutdown()
 
         # Shutdown tracing provider
         if self.config.enabled:
@@ -459,6 +550,51 @@ class TracekitClient:
     def get_snapshot_client(self) -> Optional[SnapshotClient]:
         """Get the snapshot client if code monitoring is enabled."""
         return self._snapshot_client
+
+    def counter(self, name: str, tags: Dict[str, str] = None) -> Counter:
+        """
+        Get or create a counter metric.
+
+        Args:
+            name: Metric name
+            tags: Optional tags/labels for the metric
+
+        Returns:
+            Counter instance
+        """
+        if self._metrics_registry:
+            return self._metrics_registry.counter(name, tags)
+        return noop_counter
+
+    def gauge(self, name: str, tags: Dict[str, str] = None) -> Gauge:
+        """
+        Get or create a gauge metric.
+
+        Args:
+            name: Metric name
+            tags: Optional tags/labels for the metric
+
+        Returns:
+            Gauge instance
+        """
+        if self._metrics_registry:
+            return self._metrics_registry.gauge(name, tags)
+        return noop_gauge
+
+    def histogram(self, name: str, tags: Dict[str, str] = None) -> Histogram:
+        """
+        Get or create a histogram metric.
+
+        Args:
+            name: Metric name
+            tags: Optional tags/labels for the metric
+
+        Returns:
+            Histogram instance
+        """
+        if self._metrics_registry:
+            return self._metrics_registry.histogram(name, tags)
+        return noop_histogram
 
     def capture_snapshot(
         self,
