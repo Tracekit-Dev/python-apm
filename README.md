@@ -410,6 +410,189 @@ client = tracekit.init(
 )
 ```
 
+## Metrics
+
+TraceKit APM provides a lightweight metrics API for tracking application performance and business metrics. Metrics are automatically buffered and exported in OTLP format.
+
+### Metric Types
+
+- **Counter**: Monotonically increasing values (e.g., total requests, errors)
+- **Gauge**: Point-in-time values that can increase or decrease (e.g., active connections, memory usage)
+- **Histogram**: Distribution of values (e.g., request duration, payload sizes)
+
+### Flask Usage
+
+```python
+from flask import Flask, jsonify
+import tracekit
+import time
+
+app = Flask(__name__)
+
+# Initialize TraceKit
+client = tracekit.init(
+    api_key="your-api-key",
+    service_name="my-service"
+)
+
+# Create metrics with optional tags
+request_counter = client.counter("http.requests.total", tags={"service": "api"})
+active_requests_gauge = client.gauge("http.requests.active")
+request_duration_histogram = client.histogram("http.request.duration", tags={"unit": "ms"})
+
+@app.route('/api/users')
+def get_users():
+    start_time = time.time()
+    active_requests_gauge.inc()
+
+    try:
+        request_counter.inc()
+
+        # Your business logic here
+        users = fetch_users_from_db()
+
+        return jsonify(users)
+    finally:
+        duration = (time.time() - start_time) * 1000  # Convert to ms
+        request_duration_histogram.record(duration)
+        active_requests_gauge.dec()
+
+if __name__ == '__main__':
+    app.run()
+```
+
+### FastAPI Usage
+
+```python
+from fastapi import FastAPI
+import tracekit
+import time
+
+app = FastAPI()
+
+# Initialize TraceKit
+client = tracekit.init(
+    api_key="your-api-key",
+    service_name="my-service"
+)
+
+# Create metrics
+request_counter = client.counter("http.requests.total")
+request_duration_histogram = client.histogram("http.request.duration", tags={"unit": "ms"})
+
+@app.get("/api/users")
+async def get_users():
+    start_time = time.time()
+
+    try:
+        request_counter.inc()
+
+        # Your business logic here
+        users = await fetch_users_from_db()
+
+        return users
+    finally:
+        duration = (time.time() - start_time) * 1000
+        request_duration_histogram.record(duration)
+```
+
+### Vanilla Python Usage
+
+```python
+import tracekit
+
+# Initialize TraceKit
+client = tracekit.init(
+    api_key="your-api-key",
+    service_name="my-service"
+)
+
+# Create metrics
+job_counter = client.counter("jobs.processed")
+job_duration = client.histogram("job.duration", tags={"unit": "seconds"})
+
+# Use metrics
+job_counter.inc()
+job_duration.record(3.5)
+
+# Metrics are automatically flushed on shutdown
+```
+
+### Metric API Reference
+
+#### Counter
+
+```python
+# Create counter
+counter = client.counter("metric.name")
+counter_with_tags = client.counter("metric.name", tags={"tag": "value"})
+
+# Increment by 1
+counter.inc()
+
+# Add specific value
+counter.add(5.0)
+```
+
+#### Gauge
+
+```python
+# Create gauge
+gauge = client.gauge("metric.name")
+gauge_with_tags = client.gauge("metric.name", tags={"tag": "value"})
+
+# Set to specific value
+gauge.set(42.0)
+
+# Increment by 1
+gauge.inc()
+
+# Decrement by 1
+gauge.dec()
+```
+
+#### Histogram
+
+```python
+# Create histogram
+histogram = client.histogram("metric.name")
+histogram_with_tags = client.histogram("metric.name", tags={"unit": "ms"})
+
+# Record a value
+histogram.record(123.45)
+```
+
+### Common Use Cases
+
+**HTTP Request Metrics**:
+```python
+http_requests = client.counter("http.requests.total", tags={"method": "GET"})
+active_connections = client.gauge("http.connections.active")
+request_duration = client.histogram("http.request.duration", tags={"unit": "ms"})
+```
+
+**Database Metrics**:
+```python
+queries = client.counter("db.queries.total", tags={"database": "users"})
+query_duration = client.histogram("db.query.duration", tags={"unit": "ms"})
+connection_pool_size = client.gauge("db.connections.active")
+```
+
+**Business Metrics**:
+```python
+orders = client.counter("orders.total")
+order_value = client.histogram("order.value", tags={"currency": "usd"})
+inventory = client.gauge("inventory.items")
+```
+
+### Metric Export Behavior
+
+- **Buffering**: Metrics are buffered in memory (max 100 metrics or 10 seconds)
+- **Auto-Flush**: Automatically exports when buffer is full or on interval
+- **Format**: Exported in OTLP (OpenTelemetry Protocol) JSON format
+- **Endpoint**: Sent to `/v1/metrics` endpoint (derived from traces endpoint)
+- **Shutdown**: All pending metrics are flushed on application shutdown
+
 ## Configuration
 
 ### Basic Configuration
