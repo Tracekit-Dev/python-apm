@@ -279,6 +279,133 @@ Snapshots include:
 
 Get your API key at [https://app.tracekit.dev](https://app.tracekit.dev)
 
+## PII Scrubbing
+
+TraceKit automatically scans snapshot variables for sensitive data before sending them to the server. This ensures that passwords, API keys, tokens, and other sensitive information never leave your application.
+
+### Auto-Detected Patterns
+
+The SDK automatically detects and redacts the following sensitive data types:
+
+- **Passwords** - Common password field values
+- **API Keys** - API key strings and prefixes
+- **Tokens** - Authentication and session tokens
+- **Credit Cards** - Card numbers (Visa, Mastercard, Amex, etc.)
+- **Email Addresses** - RFC-compliant email patterns
+- **SSNs** - US Social Security Numbers
+- **JWTs** - JSON Web Tokens (`eyJ...`)
+- **AWS Keys** - AWS access key IDs (`AKIA...`)
+- **Stripe Keys** - Stripe API keys (`sk_live_...`, `pk_live_...`)
+- **Private Keys** - PEM-encoded private key blocks
+
+### Sensitive Variable Name Detection
+
+Variables with sensitive names are automatically redacted as `[REDACTED:sensitive_name]`. The SDK matches the following names: `password`, `passwd`, `pwd`, `secret`, `token`, `key`, `credential`, `api_key`, `apikey`.
+
+The SDK uses letter-based boundaries (not `\b`) to correctly match names like `api_key` and `user_token`, where the underscore would otherwise prevent a word boundary match.
+
+### Value Pattern Redaction
+
+When a value matches a known sensitive pattern (e.g., a credit card number or JWT), it is redacted as `[REDACTED:type]` regardless of the variable name.
+
+### Example
+
+```python
+# These variables are automatically redacted before sending:
+client.capture_snapshot('checkout', {
+    'user_id': 123,                          # Sent as-is
+    'password': 'hunter2',                   # -> [REDACTED:sensitive_name]
+    'api_key': 'sk_live_abc123',             # -> [REDACTED:sensitive_name]
+    'user_token': 'eyJhbGci...',             # -> [REDACTED:sensitive_name]
+    'card_number': '4111111111111111',        # -> [REDACTED:credit_card]
+    'email': 'user@example.com',             # -> [REDACTED:email]
+    'note': 'contains eyJhbGci... in text',  # -> [REDACTED:jwt]
+})
+```
+
+PII scrubbing is enabled by default when code monitoring is active. No additional configuration is needed.
+
+## Kill Switch
+
+TraceKit provides a server-side kill switch to disable code monitoring per service without any code changes.
+
+### How It Works
+
+- **Enable**: Toggle the kill switch from the TraceKit dashboard or API
+- **Immediate Effect**: The SDK stops capturing snapshots as soon as the kill switch is detected
+- **Reduced Polling**: When the kill switch is active, polling frequency drops to every 60 seconds to minimize overhead
+- **Auto-Resume**: When the kill switch is disabled, snapshot captures resume automatically on the next poll cycle
+
+### No Code Changes Required
+
+The kill switch is controlled entirely from the server side:
+
+```python
+# Your code stays exactly the same
+client = tracekit.init(
+    api_key="your-api-key",
+    service_name="my-app",
+    enable_code_monitoring=True
+)
+
+# This call is a no-op when kill switch is active
+client.capture_snapshot('checkout-validation', {
+    'user_id': user_id,
+    'cart_total': cart_total,
+})
+```
+
+You can toggle the kill switch from the TraceKit dashboard under **Services > [Your Service] > Code Monitoring** or via the API.
+
+## SSE Real-time Updates
+
+The SDK supports Server-Sent Events (SSE) for receiving breakpoint changes and kill switch events in real time, without waiting for the next poll cycle.
+
+### How It Works
+
+1. The SDK auto-discovers the SSE endpoint from the poll response
+2. Once connected, breakpoint activations/deactivations and kill switch changes are received instantly
+3. If the SSE connection fails, the SDK falls back to standard polling seamlessly
+
+### No Configuration Needed
+
+SSE is automatically enabled when the server provides an SSE endpoint. The SDK handles connection management, reconnection, and fallback internally.
+
+```python
+# SSE is automatic - no code changes needed
+client = tracekit.init(
+    api_key="your-api-key",
+    service_name="my-app",
+    enable_code_monitoring=True
+)
+# SDK will connect to SSE if available, otherwise polls every 30s
+```
+
+## Circuit Breaker
+
+The SDK includes a built-in circuit breaker to protect your application if the TraceKit backend becomes unreachable.
+
+### How It Works
+
+- **Failure Threshold**: After **3 consecutive capture failures** within a **60-second window**, the circuit breaker trips
+- **Pause**: Code monitoring is automatically paused, stopping all snapshot capture attempts
+- **Cooldown**: After a **5-minute cooldown period**, the circuit breaker resets and captures resume
+- **Transparent**: No exceptions are raised in your application code; snapshots are silently skipped while the circuit is open
+
+### Example Behavior
+
+```python
+# Normal operation: snapshots are captured and sent
+client.capture_snapshot('label', {'key': 'value'})
+
+# If backend is down:
+# - First 3 failures within 60s: retries normally
+# - After 3rd failure: circuit breaker trips, captures paused
+# - After 5 minutes: circuit breaker resets, captures resume
+```
+
+No configuration is required. The circuit breaker is always active when code monitoring is enabled.
+
 ## Automatic Service Discovery
 
 TraceKit automatically instruments **outgoing HTTP calls** to create service dependency graphs. This enables you to see which services talk to each other in your distributed system.

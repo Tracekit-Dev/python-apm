@@ -77,6 +77,15 @@ class SnapshotClient:
         self.stop_polling = False
         self.last_fetch: Optional[datetime] = None
 
+        # Kill switch: server-initiated monitoring disable
+        self._kill_switch_active = False
+
+        # SSE (Server-Sent Events) real-time updates
+        self._sse_endpoint: Optional[str] = None
+        self._sse_active = False
+        self._sse_thread: Optional[threading.Thread] = None
+        self._sse_stop = False
+
     def start(self) -> None:
         """Start background polling for active breakpoints."""
         self.fetch_active_breakpoints()  # Immediate fetch
@@ -89,10 +98,14 @@ class SnapshotClient:
         print(f"📸 TraceKit Snapshot Client started for service: {self.service_name}")
 
     def stop(self) -> None:
-        """Stop polling for breakpoints."""
+        """Stop polling for breakpoints and close SSE connection."""
         self.stop_polling = True
+        self._sse_stop = True
+        self._sse_active = False
         if self.poll_thread:
             self.poll_thread.join(timeout=5)
+        if self._sse_thread:
+            self._sse_thread.join(timeout=5)
         print("📸 TraceKit Snapshot Client stopped")
 
     def _poll_loop(self) -> None:
@@ -100,6 +113,9 @@ class SnapshotClient:
         while not self.stop_polling:
             time.sleep(30)  # Poll every 30 seconds
             if not self.stop_polling:
+                # Skip polling when SSE is actively connected
+                if self._sse_active:
+                    continue
                 self.fetch_active_breakpoints()
 
     def check_and_capture_with_context(
@@ -115,6 +131,10 @@ class SnapshotClient:
             variables: Variables to capture
         """
         variables = variables or {}
+
+        # Check kill switch before capturing
+        if self._kill_switch_active:
+            return
 
         # Get caller information using inspect
         frame = inspect.currentframe()
@@ -219,11 +239,154 @@ class SnapshotClient:
 
             data = response.json()
             breakpoints = data.get("breakpoints", [])
+
+            # Handle kill switch state
+            kill_switch = data.get("kill_switch", False)
+            if kill_switch and not self._kill_switch_active:
+                print("TraceKit: Code monitoring disabled by server kill switch.")
+            elif not kill_switch and self._kill_switch_active:
+                print("TraceKit: Code monitoring re-enabled by server.")
+            self._kill_switch_active = kill_switch
+
+            # If kill-switched, close any active SSE connection
+            if self._kill_switch_active and self._sse_active:
+                self._sse_stop = True
+                self._sse_active = False
+                print("TraceKit: SSE connection closed due to kill switch")
+
+            # SSE auto-discovery: if sse_endpoint present and not already connected
+            sse_endpoint = data.get("sse_endpoint")
+            if sse_endpoint and not self._sse_active and not self._kill_switch_active and len(breakpoints) > 0:
+                self._sse_endpoint = sse_endpoint
+                self._sse_stop = False
+                self._sse_thread = threading.Thread(
+                    target=self._connect_sse, args=(sse_endpoint,), daemon=True
+                )
+                self._sse_thread.start()
+
             self.update_breakpoint_cache(breakpoints)
             self.last_fetch = datetime.now()
 
         except Exception as e:
             print(f"⚠️  Failed to fetch breakpoints: {e}")
+
+    def _connect_sse(self, endpoint: str) -> None:
+        """Connect to SSE endpoint for real-time breakpoint updates.
+        Falls back to polling if SSE connection fails or is interrupted.
+        Runs in a daemon thread."""
+        try:
+            full_url = f"{self.base_url}{endpoint}"
+            response = requests.get(
+                full_url,
+                headers={
+                    "X-API-Key": self.api_key,
+                    "Accept": "text/event-stream",
+                },
+                stream=True,
+                timeout=(10, None),  # 10s connect timeout, no read timeout
+            )
+
+            if response.status_code != 200:
+                print(f"TraceKit: SSE endpoint returned {response.status_code}, falling back to polling")
+                self._sse_active = False
+                return
+
+            self._sse_active = True
+            print("TraceKit: SSE connection established for real-time breakpoint updates")
+
+            event_type = ""
+            data_buffer = ""
+
+            for line_bytes in response.iter_lines(decode_unicode=True):
+                if self._sse_stop:
+                    break
+
+                if line_bytes is None:
+                    continue
+
+                line = line_bytes if isinstance(line_bytes, str) else line_bytes.decode("utf-8", errors="replace")
+
+                if line.startswith("event:"):
+                    event_type = line[6:].strip()
+                elif line.startswith("data:"):
+                    if data_buffer:
+                        data_buffer += "\n"
+                    data_buffer += line[5:].strip()
+                elif line == "":
+                    # Empty line = event boundary
+                    if event_type and data_buffer:
+                        self._handle_sse_event(event_type, data_buffer)
+                    event_type = ""
+                    data_buffer = ""
+
+            print("TraceKit: SSE connection closed, falling back to polling")
+
+        except BaseException as e:
+            # Crash isolation: never let SSE bugs crash the host application
+            print(f"TraceKit: SSE connection lost, falling back to polling: {e}")
+        finally:
+            self._sse_active = False
+
+    def _handle_sse_event(self, event_type: str, data: str) -> None:
+        """Process a single SSE event."""
+        try:
+            if event_type == "init":
+                init_data = json.loads(data)
+                breakpoints = init_data.get("breakpoints", [])
+                self.update_breakpoint_cache(breakpoints)
+                self._kill_switch_active = init_data.get("kill_switch", False)
+                if self._kill_switch_active:
+                    self._sse_stop = True
+                print(f"TraceKit: SSE init received, {len(breakpoints)} breakpoints loaded")
+
+            elif event_type in ("breakpoint_created", "breakpoint_updated"):
+                bp_data = json.loads(data)
+                bp = BreakpointConfig(
+                    id=bp_data["id"],
+                    service_name=self.service_name,
+                    file_path=bp_data["file_path"],
+                    function_name=bp_data.get("function_name", ""),
+                    label=bp_data.get("label"),
+                    line_number=bp_data["line_number"],
+                    condition=bp_data.get("condition"),
+                    max_captures=bp_data.get("max_captures", 100),
+                    capture_count=bp_data.get("capture_count", 0),
+                    expire_at=datetime.fromisoformat(bp_data["expire_at"]) if bp_data.get("expire_at") else None,
+                    enabled=bp_data.get("enabled", True),
+                )
+                # Upsert by label key and line key
+                if bp.label and bp.function_name:
+                    label_key = f"{bp.function_name}:{bp.label}"
+                    self.breakpoints_cache[label_key] = bp
+                line_key = f"{bp.file_path}:{bp.line_number}"
+                self.breakpoints_cache[line_key] = bp
+                print(f"TraceKit: SSE breakpoint {event_type}: {bp.id}")
+
+            elif event_type == "breakpoint_deleted":
+                delete_data = json.loads(data)
+                bp_id = delete_data["id"]
+                keys_to_delete = [
+                    key for key, bp in self.breakpoints_cache.items() if bp.id == bp_id
+                ]
+                for key in keys_to_delete:
+                    del self.breakpoints_cache[key]
+                print(f"TraceKit: SSE breakpoint deleted: {bp_id}")
+
+            elif event_type == "kill_switch":
+                ks_data = json.loads(data)
+                self._kill_switch_active = ks_data.get("enabled", False)
+                if self._kill_switch_active:
+                    print("TraceKit: Kill switch enabled via SSE, closing connection")
+                    self._sse_stop = True
+
+            elif event_type == "heartbeat":
+                pass  # No action needed -- keeps connection alive
+
+            else:
+                print(f"TraceKit: unknown SSE event type: {event_type}")
+
+        except BaseException as e:
+            print(f"TraceKit: error handling SSE event {event_type}: {e}")
 
     def update_breakpoint_cache(self, breakpoints: List[Dict[str, Any]]) -> None:
         """Update in-memory cache of breakpoints."""
@@ -429,8 +592,8 @@ class SnapshotClient:
             'credit_card': re.compile(r'\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14})\b'),
         }
 
-        # Variable name pattern for sensitive keywords
-        sensitive_name_pattern = re.compile(r'(?i)(password|secret|token|key|credential)')
+        # Letter-boundary pattern -- avoids matching substrings like "monkey" or "turkey"
+        sensitive_name_pattern = re.compile(r'(?i)(?:^|[^a-zA-Z])(password|passwd|pwd|secret|token|key|credential|api_key|apikey)(?:[^a-zA-Z]|$)')
 
         security_flags = []
         sanitized = self.sanitize_variables(variables)
