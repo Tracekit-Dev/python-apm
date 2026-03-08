@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, asdict
 
 import requests
+from opentelemetry import trace as otel_trace
 
 
 @dataclass
@@ -188,6 +189,18 @@ class SnapshotClient:
         # Scan variables for security issues
         sanitized_vars, security_flags = self.scan_for_security_issues(variables)
 
+        # Extract trace context from OpenTelemetry
+        trace_id = None
+        span_id = None
+        try:
+            current_span = otel_trace.get_current_span()
+            span_context = current_span.get_span_context()
+            if span_context.is_valid and (span_context.trace_flags & otel_trace.TraceFlags.SAMPLED):
+                trace_id = format(span_context.trace_id, '032x')
+                span_id = format(span_context.span_id, '016x')
+        except Exception:
+            pass
+
         # Create snapshot
         snapshot = Snapshot(
             breakpoint_id=breakpoint.id,
@@ -200,8 +213,8 @@ class SnapshotClient:
             security_flags=security_flags,
             stack_trace=stack_trace,
             request_context=request_context,
-            trace_id=None,  # TODO: Extract from OpenTelemetry context
-            span_id=None,   # TODO: Extract from OpenTelemetry context
+            trace_id=trace_id,
+            span_id=span_id,
             captured_at=datetime.now()
         )
 
