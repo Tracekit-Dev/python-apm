@@ -80,6 +80,7 @@ class SnapshotClient:
 
         # Kill switch: server-initiated monitoring disable
         self._kill_switch_active = False
+        self._poll_event = threading.Event()
 
         # SSE (Server-Sent Events) real-time updates
         self._sse_endpoint: Optional[str] = None
@@ -101,6 +102,7 @@ class SnapshotClient:
     def stop(self) -> None:
         """Stop polling for breakpoints and close SSE connection."""
         self.stop_polling = True
+        self._poll_event.set()
         self._sse_stop = True
         self._sse_active = False
         if self.poll_thread:
@@ -112,7 +114,9 @@ class SnapshotClient:
     def _poll_loop(self) -> None:
         """Background polling loop."""
         while not self.stop_polling:
-            time.sleep(30)  # Poll every 30 seconds
+            interval = 60 if self._kill_switch_active else 30
+            self._poll_event.wait(timeout=interval)
+            self._poll_event.clear()
             if not self.stop_polling:
                 # Skip polling when SSE is actively connected
                 if self._sse_active:
@@ -388,12 +392,13 @@ class SnapshotClient:
             elif event_type == "kill_switch":
                 ks_data = json.loads(data)
                 self._kill_switch_active = ks_data.get("enabled", False)
+                self._poll_event.set()
                 if self._kill_switch_active:
                     print("TraceKit: Kill switch enabled via SSE, closing connection")
                     self._sse_stop = True
 
-            elif event_type == "heartbeat":
-                pass  # No action needed -- keeps connection alive
+            elif event_type in ("heartbeat", "sdk_count"):
+                pass  # No action needed -- heartbeat keeps connection alive, sdk_count is for dashboard UI
 
             else:
                 print(f"TraceKit: unknown SSE event type: {event_type}")
