@@ -9,11 +9,13 @@ from tracekit.client import TracekitClient, TracekitConfig
 from tracekit.snapshot_client import SnapshotClient
 from tracekit.utils import extract_client_ip_from_headers
 from tracekit.metrics import Counter, Gauge, Histogram
+from tracekit.integrations import LLMConfig
 
 __version__ = "1.0.0"
 __all__ = [
     "TracekitClient",
     "TracekitConfig",
+    "LLMConfig",
     "SnapshotClient",
     "Counter",
     "Gauge",
@@ -35,6 +37,8 @@ def init(
     sample_rate: float = 1.0,
     enable_code_monitoring: bool = False,
     service_name_mappings: Optional[Dict[str, str]] = None,
+    instrument_llm=None,
+    capture_content: bool = False,
 ) -> TracekitClient:
     """
     Initialize TraceKit APM with the given configuration.
@@ -48,6 +52,9 @@ def init(
         enable_code_monitoring: Enable live code debugging (default: False)
         service_name_mappings: Map hostnames to service names for peer.service attribute
             Example: {"localhost:8082": "go-test-app", "localhost:8084": "node-test-app"}
+        instrument_llm: LLM instrumentation config (dict, LLMConfig, or None for defaults)
+            Example: {"openai": True, "anthropic": False}
+        capture_content: Capture prompt/completion content (default: False)
 
     Returns:
         TracekitClient instance
@@ -62,6 +69,8 @@ def init(
         sample_rate=sample_rate,
         enable_code_monitoring=enable_code_monitoring,
         service_name_mappings=service_name_mappings,
+        instrument_llm=instrument_llm,
+        capture_content=capture_content,
     )
 
     _global_client = TracekitClient(config)

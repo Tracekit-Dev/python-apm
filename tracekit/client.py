@@ -21,6 +21,7 @@ from opentelemetry.sdk.trace import ReadableSpan
 
 from tracekit.snapshot_client import SnapshotClient
 from tracekit.metrics import MetricsRegistry, Counter, Gauge, Histogram, noop_counter, noop_gauge, noop_histogram
+from tracekit.integrations.llm_common import LLMConfig
 
 
 def _detect_local_ui() -> bool:
@@ -290,6 +291,10 @@ class TracekitConfig:
     # Useful for mapping localhost URLs to actual service names
     # Example: {"localhost:8082": "go-test-app", "localhost:8084": "node-test-app"}
     service_name_mappings: Optional[Dict[str, str]] = None
+    # LLM auto-instrumentation config (dict or LLMConfig)
+    instrument_llm: Optional[Any] = None
+    # Capture prompt/completion content (default: False)
+    capture_content: bool = False
 
 
 class TracekitClient:
@@ -352,6 +357,9 @@ class TracekitClient:
                 service_name=config.service_name
             )
             self._snapshot_client.start()
+
+        # Auto-detect and instrument LLM libraries
+        self._instrument_llm(config)
 
     def start_trace(
         self,
@@ -613,6 +621,42 @@ class TracekitClient:
                 label,
                 variables or {}
             )
+
+    def _instrument_llm(self, config: TracekitConfig) -> None:
+        """
+        Auto-detect and instrument LLM libraries (OpenAI, Anthropic).
+
+        Creates an LLMConfig from the config parameters and patches detected libraries.
+        """
+        # Build LLM config
+        if isinstance(config.instrument_llm, LLMConfig):
+            llm_config = config.instrument_llm
+        elif isinstance(config.instrument_llm, dict):
+            llm_config = LLMConfig(**config.instrument_llm)
+        else:
+            # Default: enabled with content capture from config
+            llm_config = LLMConfig(capture_content=config.capture_content)
+
+        # Override capture_content from top-level config if not set via LLMConfig
+        if not isinstance(config.instrument_llm, (LLMConfig, dict)):
+            llm_config.capture_content = config.capture_content
+
+        if not llm_config.enabled:
+            return
+
+        if llm_config.openai:
+            try:
+                from tracekit.integrations.openai import instrument_openai
+                instrument_openai(self.tracer, llm_config)
+            except Exception:
+                pass  # Silent - never break user code
+
+        if llm_config.anthropic:
+            try:
+                from tracekit.integrations.anthropic import instrument_anthropic
+                instrument_anthropic(self.tracer, llm_config)
+            except Exception:
+                pass  # Silent - never break user code
 
     def _instrument_http_clients(self) -> None:
         """
