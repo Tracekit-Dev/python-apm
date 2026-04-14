@@ -4,15 +4,26 @@ Snapshot Client - Code monitoring with breakpoints and variable inspection
 
 import inspect
 import json
+import logging
 import re
+import traceback
 import threading
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 
 import requests
 from opentelemetry import trace as otel_trace
+
+from tracekit.evaluator import (
+    UnsupportedExpressionError,
+    evaluate_condition,
+    evaluate_expressions,
+    is_sdk_evaluable,
+)
+
+logger = logging.getLogger("tracekit")
 
 
 @dataclass
@@ -29,6 +40,14 @@ class BreakpointConfig:
     capture_count: int
     expire_at: Optional[datetime]
     enabled: bool
+    # v25 fields
+    mode: Optional[str] = None
+    stack_depth: Optional[int] = None
+    max_depth: Optional[int] = None
+    max_payload_bytes: Optional[int] = None
+    condition_eval: Optional[str] = None
+    capture_expressions: Optional[List[str]] = None
+    idle_timeout_hours: Optional[int] = None
 
 
 @dataclass
@@ -55,6 +74,36 @@ class Snapshot:
     span_id: Optional[str]
     request_context: Optional[Dict[str, Any]]
     captured_at: datetime
+    # v25 field
+    expression_results: Optional[Dict[str, Any]] = None
+
+
+def _limit_depth(data: Any, current_depth: int, max_depth: int) -> Any:
+    """Truncate nested dicts/lists beyond the given depth limit."""
+    if current_depth >= max_depth:
+        return {"_truncated": True, "_depth": current_depth}
+
+    if isinstance(data, dict):
+        result = {}
+        for k, v in data.items():
+            if isinstance(v, (dict, list)):
+                result[k] = _limit_depth(v, current_depth + 1, max_depth)
+            else:
+                result[k] = v
+        return result
+
+    if isinstance(data, list):
+        if current_depth >= max_depth:
+            return {"_truncated": True, "_depth": current_depth, "_length": len(data)}
+        result = []
+        for item in data:
+            if isinstance(item, (dict, list)):
+                result.append(_limit_depth(item, current_depth + 1, max_depth))
+            else:
+                result.append(item)
+        return result
+
+    return data
 
 
 class SnapshotClient:
@@ -184,14 +233,59 @@ class SnapshotClient:
         if breakpoint.max_captures > 0 and breakpoint.capture_count >= breakpoint.max_captures:
             return
 
+        # --- v25: Evaluate condition locally for sdk-evaluable expressions ---
+        if breakpoint.condition and breakpoint.condition_eval == "sdk-evaluable":
+            try:
+                result = evaluate_condition(breakpoint.condition, variables)
+                if not result:
+                    return  # Condition false, skip capture
+            except UnsupportedExpressionError:
+                logger.warning(
+                    "TraceKit: expression classified as sdk-evaluable but failed locally, "
+                    "falling back to server: %s", breakpoint.condition
+                )
+            except Exception as exc:
+                logger.warning(
+                    "TraceKit: condition evaluation error, falling back to server: %s", exc
+                )
+
+        # --- v25: Logpoint mode ---
+        if breakpoint.mode == "logpoint":
+            expr_results = evaluate_expressions(
+                breakpoint.capture_expressions or [], variables
+            )
+            snapshot = Snapshot(
+                breakpoint_id=breakpoint.id,
+                service_name=self.service_name,
+                file_path=file_path,
+                function_name=function_name,
+                label=label,
+                line_number=line_number,
+                variables={},
+                security_flags=None,
+                stack_trace="",
+                request_context=None,
+                trace_id=None,
+                span_id=None,
+                captured_at=datetime.now(),
+                expression_results=expr_results,
+            )
+            self.capture_snapshot(snapshot)
+            return
+
+        # --- v25: Per-breakpoint capture depth ---
+        capture_depth = breakpoint.max_depth
+        sanitized_vars, security_flags = self.scan_for_security_issues(variables)
+        if capture_depth is not None and capture_depth > 0:
+            sanitized_vars = _limit_depth(sanitized_vars, 0, capture_depth)
+
+        # --- v25: Per-breakpoint payload limit applied after serialization ---
+
         # Extract request context
         request_context = self.extract_request_context()
 
-        # Get stack trace
-        stack_trace = self._get_stack_trace()
-
-        # Scan variables for security issues
-        sanitized_vars, security_flags = self.scan_for_security_issues(variables)
+        # Get stack trace with dynamic depth
+        stack_trace = self._get_stack_trace(max_depth=breakpoint.stack_depth)
 
         # Extract trace context from OpenTelemetry
         trace_id = None
@@ -219,25 +313,42 @@ class SnapshotClient:
             request_context=request_context,
             trace_id=trace_id,
             span_id=span_id,
-            captured_at=datetime.now()
+            captured_at=datetime.now(),
         )
 
-        # Send snapshot
-        self.capture_snapshot(snapshot)
+        # Send snapshot (applies payload limit if configured)
+        self.capture_snapshot(snapshot, max_payload_bytes=breakpoint.max_payload_bytes)
 
-    def _get_stack_trace(self) -> str:
-        """Get current stack trace as a string."""
+    def _get_stack_trace(self, max_depth: Optional[int] = None) -> str:
+        """Get current stack trace as a string.
+
+        Args:
+            max_depth: Maximum number of frames to include. None means full
+                       stack (capped at 32KB equivalent for safety).
+        """
         stack = inspect.stack()[3:]  # Skip internal frames
+
+        if max_depth is not None and max_depth > 0:
+            stack = stack[:max_depth]
+
         lines = []
+        total_len = 0
+        max_bytes = 32 * 1024  # 32KB safety cap
+
         for frame_info in stack:
             func_name = frame_info.function
             file_path = frame_info.filename
             line_no = frame_info.lineno
 
             if func_name and func_name != "<module>":
-                lines.append(f"{func_name} at {file_path}:{line_no}")
+                line = f"{func_name} at {file_path}:{line_no}"
             else:
-                lines.append(f"{file_path}:{line_no}")
+                line = f"{file_path}:{line_no}"
+
+            total_len += len(line) + 1
+            if total_len > max_bytes:
+                break
+            lines.append(line)
 
         return "\n".join(lines)
 
@@ -370,6 +481,13 @@ class SnapshotClient:
                     capture_count=bp_data.get("capture_count", 0),
                     expire_at=datetime.fromisoformat(bp_data["expire_at"]) if bp_data.get("expire_at") else None,
                     enabled=bp_data.get("enabled", True),
+                    mode=bp_data.get("mode"),
+                    stack_depth=bp_data.get("stack_depth"),
+                    max_depth=bp_data.get("max_depth"),
+                    max_payload_bytes=bp_data.get("max_payload_bytes"),
+                    condition_eval=bp_data.get("condition_eval"),
+                    capture_expressions=bp_data.get("capture_expressions"),
+                    idle_timeout_hours=bp_data.get("idle_timeout_hours"),
                 )
                 # Upsert by label key and line key
                 if bp.label and bp.function_name:
@@ -424,7 +542,15 @@ class SnapshotClient:
                 max_captures=bp_data.get("max_captures", 100),
                 capture_count=bp_data.get("capture_count", 0),
                 expire_at=datetime.fromisoformat(bp_data["expire_at"]) if bp_data.get("expire_at") else None,
-                enabled=bp_data.get("enabled", True)
+                enabled=bp_data.get("enabled", True),
+                # v25 fields
+                mode=bp_data.get("mode"),
+                stack_depth=bp_data.get("stack_depth"),
+                max_depth=bp_data.get("max_depth"),
+                max_payload_bytes=bp_data.get("max_payload_bytes"),
+                condition_eval=bp_data.get("condition_eval"),
+                capture_expressions=bp_data.get("capture_expressions"),
+                idle_timeout_hours=bp_data.get("idle_timeout_hours"),
             )
 
             # Primary key: function + label
@@ -491,8 +617,17 @@ class SnapshotClient:
             print(f"⚠️  Failed to auto-register breakpoint: {e}")
             return None
 
-    def capture_snapshot(self, snapshot: Snapshot) -> None:
-        """Capture and send snapshot to backend."""
+    def capture_snapshot(
+        self, snapshot: Snapshot, max_payload_bytes: Optional[int] = None
+    ) -> None:
+        """Capture and send snapshot to backend.
+
+        Args:
+            snapshot: The snapshot to send.
+            max_payload_bytes: Per-breakpoint payload limit. If the serialized
+                snapshot exceeds this, variables are replaced with a truncation
+                marker.
+        """
         try:
             # Convert snapshot to dict
             snapshot_dict = asdict(snapshot)
@@ -506,6 +641,17 @@ class SnapshotClient:
                 # Format as RFC3339 with 'Z' suffix for UTC
                 snapshot_dict["captured_at"] = snapshot_dict["captured_at"].strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
+            # Apply per-breakpoint payload limit
+            if max_payload_bytes and max_payload_bytes > 0:
+                body = json.dumps(snapshot_dict).encode("utf-8")
+                if len(body) > max_payload_bytes:
+                    snapshot_dict["variables"] = {
+                        "_truncated": True,
+                        "_payload_size": len(body),
+                        "_max_payload": max_payload_bytes,
+                        "_truncated_by": "payload_limit",
+                    }
+
             response = requests.post(
                 f"{self.base_url}/sdk/snapshots/capture",
                 headers={
@@ -517,12 +663,12 @@ class SnapshotClient:
             )
 
             if response.status_code not in [200, 201]:
-                print(f"⚠️  Failed to capture snapshot: {response.status_code} - {response.text}")
+                print(f"Failed to capture snapshot: {response.status_code} - {response.text}")
             else:
-                print(f"📸 Snapshot captured: {snapshot.label or snapshot.file_path}")
+                print(f"Snapshot captured: {snapshot.label or snapshot.file_path}")
 
         except Exception as e:
-            print(f"⚠️  Failed to capture snapshot: {e}")
+            print(f"Failed to capture snapshot: {e}")
 
     def extract_request_context(self) -> Optional[Dict[str, Any]]:
         """
